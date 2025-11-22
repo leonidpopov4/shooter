@@ -1,57 +1,112 @@
 # Shooter
 
-A small first-person Python arena shooter I built for fun.
+Shooter is a small 3D-ish first-person arena shooter written in **Python** using **Pygame** + **PyOpenGL**.
 
-You fight a bot in a simple 3D-ish arena, swap weapons, and mess with different settings in the code.
-
----
-
-## Status
-
-✅ **Project status: Finished**
-
-The game is basically **complete**.  
-From here on, I only plan small updates:
-
-- bug fixes
-- tiny tweaks / balance changes
-- maybe some visual polish
-
-No huge new systems or rewrites are planned.
+You fight a bot in a floating “tray” arena, swap between different weapons (AK47, Sniper, Shotgun, etc.), and experiment with bot difficulty and settings.
 
 ---
 
-## Features
+## 🔥 Project Status
 
-- First-person arena shooter built with Python
-- 1v1 **duel** vs a bot (first to 5 kills)
-- Bot AI that moves and shoots back
-- Multiple weapons with different behavior (`weapons.py`)
-- Simple OpenGL-style arena rendering (`render.py`)
-- All the important knobs in one place (`settings.py`)
+🧪 **Project status: Beta**
+
+The core **Duel** mode is playable, but the game is still in **beta**:
+
+- Things may change or break
+- Balancing is still being tweaked
+- Visuals / feel might be updated
+
+There used to be an experimental Free For All (FFA) mode, but it was too glitchy and has been **removed for now**.  
+FFA may come back in the future when it’s stable.
 
 ---
 
-## Controls
+## 🕹️ Features
 
-_Default controls (can be changed in the code):_
+- **First-person shooter** built in pure Python
+- **Duel mode** – 1v1 vs a single bot (first to a certain number of kills)
+- Multiple weapons, each with their own stats:
+  - `Pistol`
+  - `minigun`
+  - `AK47`
+  - `Spray Gun`
+  - `Sniper`
+  - `Shotgun`
+- Bot AI profiles (different “personalities”), for example:
+  - `AK47 Bot`
+  - `Sniper Bot`
+  - `Shotgun Bot`
+  - `sweat` (more aggressive / sweaty profile)
+- Simple 3D “tray” arena with obstacles and blocks
+- Customizable **movement, FOV, arena size, sensitivity, etc.** via config files
+- Health bars, hit feedback, muzzle flashes, shell casings, and a basic HUD
+
+---
+
+## 🎮 Controls
+
+Default controls (you can change them in the code):
+
+### In the menu
+
+- `UP / DOWN` – Change bot profile
+- `LEFT / RIGHT` – Change primary weapon
+- `Q / E` – Change map
+- `ENTER` – Start match
+- `ESC` – Quit the game
+
+*(If your build shows any extra menu options, they may be experimental.)*
+
+### In game
 
 - **Move** – `W A S D`
 - **Jump** – `SPACE`
-- **Sprint** – `Shift` (if enabled)
-- **Shoot** – Left mouse button
-- **Look around** – Mouse
-- **Switch weapon** – Number keys (e.g. `1`, `2`)
+- **Sprint** – `Left Shift`
+- **Look / Aim** – Move the mouse
+- **Fire** – Left Mouse Button (LMB)
+- **Aim down sights** – Right Mouse Button (RMB) (improves accuracy)
 - **Reload** – `R`
-- **Quit / exit game** – `ESC`
+- **Switch weapon**
+  - `1` – Primary weapon (AK47, Sniper, etc.)
+  - `2` – Pistol (secondary)
+- **Quit / return to menu** – `ESC`
 
 ---
 
-## How to Run
+## 🧩 Game Mode: Duel
 
-You’ll need **Python 3.x** and a desktop OS (Windows/Linux/macOS) with working graphics drivers.
+- 1 player vs 1 bot
+- You choose:
+  - Bot type
+  - Primary weapon
+  - Map (layouts defined in `geometry.py`)
+- First to a certain number of kills (e.g. 5) wins the duel
+- HUD shows:
+  - Your HP
+  - Bot HP
+  - Ammo info
 
-1. Install dependencies:
+---
+
+## 🛠️ Requirements
+
+You’ll need:
+
+- **Python 3.x**
+- A desktop OS (Windows, Linux, or macOS) with working OpenGL drivers
+
+Python packages:
+
+- `pygame`
+- `PyOpenGL`
+- `PyOpenGL_accelerate` (optional but recommended)
+
+---
+
+## 🚀 Installation & Running
+
+1. **Clone or download** this repository:
 
    ```bash
-   pip install pygame PyOpenGL PyOpenGL_accelerate
+   git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+   cd YOUR_REPO_NAME
