@@ -10,7 +10,7 @@ You fight a bot in a floating “tray” arena, swap between different weapons (
 
 🧪 **Project status: Beta**
 
-The core **Duel** mode is playable, but the game is still in **beta**:
+The core **Duel** mode is playable, but the game is still in beta:
 
 - Things may change or break
 - Balancing is still being tweaked
@@ -45,7 +45,7 @@ FFA may come back in the future when it’s stable.
 
 ## 🎮 Controls
 
-Default controls (you can change them in the code):
+_Default controls (you can change them in the code):_
 
 ### In the menu
 
