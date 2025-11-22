@@ -108,5 +108,5 @@ Python packages:
 1. **Clone or download** this repository:
 
    ```bash
-   git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
-   cd YOUR_REPO_NAME
+   git clone https://github.com/leonidpopov4/shooter.git
+   cd shooter
