@@ -23,6 +23,9 @@ class WeaponStats:
     is_auto: bool = False
     aim_accuracy_bonus: float = 0.2
     close_range_only: bool = False
+    # New fields for projectile / explosive weapons:
+    is_projectile: bool = False        # if True, spawn a moving projectile (rocket, grenade)
+    explosion_radius: float = 0.0      # area of effect radius (world units)
 
 
 @dataclass
@@ -34,6 +37,12 @@ class Projectile:
     lifetime: float = 0.18
     age: float = 0.0
     color: Tuple[float, float, float] = (1.0, 1.0, 0.2)
+    # New fields:
+    is_hitscan: bool = True            # hitscan (instant) vs moving projectile
+    explosive: bool = False            # whether this projectile causes an explosion on impact
+    explosion_radius: float = 0.0      # radius/size of explosion
+    owner: Optional[str] = None        # 'player' or 'bot' to credit kills
+    creation_time: float = 0.0         # time when projectile was created (pygame seconds)
 
 
 @dataclass
@@ -54,7 +63,6 @@ class ShellCasing:
 # -----------------------------
 # Weapon definitions
 # -----------------------------
-
 WEAPON_DEFS = {
     "Pistol": WeaponStats(
         name="Pistol",
@@ -135,6 +143,22 @@ WEAPON_DEFS = {
         aim_accuracy_bonus=0.05,
         close_range_only=True,
     ),
+    # New explosive rocket launcher (RPG)
+    "RPG": WeaponStats(
+        name="RPG",
+        fire_rate=0.6,            # slow rate of fire
+        magazine_size=1,
+        reload_time=2.5,
+        damage=120.0,            # direct rocket damage (center)
+        accuracy=0.9,
+        range=120.0,
+        pellet_count=1,
+        projectile_speed=60.0,   # travel speed of rocket
+        is_auto=False,
+        is_projectile=True,
+        explosion_radius=2.0,    # blast cube half-size ~ 2 units (smaller)
+        aim_accuracy_bonus=0.15,
+    ),
 }
 
 
@@ -198,7 +222,10 @@ class Weapon:
 
         projectiles: List[Projectile] = []
         color = (1.0, 1.0, 0.2) if from_player else (1.0, 0.3, 0.3)
+        # spread base uses accuracy; for projectiles we still add small spread
         spread_base = (1.0 - accuracy) * 0.12
+
+        muzzle_offset = 0.9  # spawn the projectile slightly ahead of the shooter to avoid self-hit
 
         for _ in range(self.stats.pellet_count):
             dx = (random.random() * 2 - 1) * spread_base
@@ -214,15 +241,37 @@ class Weapon:
             else:
                 dir_spread = dir_spread.normalize()
 
-            projectiles.append(
-                Projectile(
-                    origin=origin.copy(),
+            # For projectile weapons (RPG), create a moving projectile that will explode on impact.
+            if self.stats.is_projectile:
+                proj_origin = origin.copy() + dir_spread * muzzle_offset
+                proj = Projectile(
+                    origin=proj_origin,
                     direction=dir_spread,
                     speed=self.stats.projectile_speed,
                     damage=self.stats.damage,
+                    lifetime=6.0,  # allow some travel time
                     color=color,
+                    is_hitscan=False,
+                    explosive=(self.stats.explosion_radius > 0.0),
+                    explosion_radius=self.stats.explosion_radius,
+                    owner=("player" if from_player else "bot"),
+                    creation_time=now,
                 )
-            )
+                projectiles.append(proj)
+            else:
+                # regular instant projectile (visual)
+                proj_origin = origin.copy()
+                projectiles.append(
+                    Projectile(
+                        origin=proj_origin,
+                        direction=dir_spread,
+                        speed=self.stats.projectile_speed,
+                        damage=self.stats.damage,
+                        color=color,
+                        is_hitscan=True,
+                        creation_time=now,
+                    )
+                )
 
         flash = MuzzleFlash(pos=origin.copy())
 
