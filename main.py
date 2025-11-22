@@ -1,9 +1,12 @@
 # main.py
-# Game loop + menu for Blue Arena shooter (Duel + FFA with bot-vs-bot).
+# Complete game loop + responsive menu for Blue Arena shooter (DUEL only),
+# with RPG rockets that spawn ahead of the muzzle, grow an orange cube on impact,
+# and the menu/UI restored to the previous responsive layout you liked.
 
 import sys
 import math
 import random
+import time
 
 import pygame
 from pygame.locals import (
@@ -11,7 +14,7 @@ from pygame.locals import (
     K_w, K_a, K_s, K_d,
     K_LSHIFT, K_ESCAPE, K_r,
     K_1, K_2,
-    K_SPACE, K_TAB,
+    K_SPACE,
 )
 from pygame.math import Vector3
 
@@ -26,7 +29,7 @@ from settings import (
 )
 from geometry import build_map_geometry, find_safe_spawn, move_with_collisions, OBSTACLES
 from actors import Player, Bot, AI_PROFILES, AIProfile
-from weapons import WEAPON_DEFS
+from weapons import WEAPON_DEFS, Projectile, MuzzleFlash
 from render import (
     draw_map_with_edges,
     draw_bot,
@@ -43,41 +46,127 @@ from shooting import ray_hits_actor
 
 
 # -----------------------------
-# Modes / maps
+# Explosion cube with growth animation
 # -----------------------------
+class ExplosionCube:
+    def __init__(self, pos: Vector3, start_size: float, target_size: float, lifetime: float, owner: str):
+        self.pos = pos.copy()
+        self.start_size = float(start_size)
+        self.target_size = float(target_size)
+        self.size = float(start_size)
+        self.lifetime = float(lifetime)
+        self.age = 0.0
+        self.owner = owner  # 'player' or 'bot'
+        self.damaged_player = False
+        self.damaged_bots = set()  # indices of bots already damaged
 
-MODE_IDS = ["duel", "ffa"]
-MODE_LABELS = {
-    "duel": "Duel (1v1, first to 5)",
-    "ffa": "Free For All (10 bots)",
-}
+    def half(self):
+        return self.size * 0.5
 
+    def contains_actor(self, actor_pos: Vector3, actor_radius: float) -> bool:
+        # AABB check in X/Z and allow some vertical tolerance
+        h = self.half()
+        dx = abs(actor_pos.x - self.pos.x)
+        dz = abs(actor_pos.z - self.pos.z)
+        dy = abs(actor_pos.y - self.pos.y)
+        vertical_limit = h + actor_radius + 0.5
+        if dx <= (h + actor_radius) and dz <= (h + actor_radius) and dy <= vertical_limit:
+            return True
+        return False
+
+    def update(self, dt: float):
+        self.age += dt
+        t = min(1.0, max(0.0, self.age / self.lifetime))
+        # ease-out growth (smooth)
+        ease = 1 - (1 - t) * (1 - t)
+        self.size = self.start_size + (self.target_size - self.start_size) * ease
+
+    def draw(self):
+        s = self.half()
+        x, y, z = self.pos.x, self.pos.y, self.pos.z
+        glPushMatrix()
+        glTranslatef(x, y, z)
+        alpha = max(0.12, 0.9 * (1.0 - self.age / self.lifetime))
+        glColor4f(1.0, 0.45, 0.0, alpha)
+        # Draw cube centered at origin with side length self.size
+        glBegin(GL_QUADS)
+        # top face (+y)
+        glVertex3f(-s, s, -s)
+        glVertex3f(s, s, -s)
+        glVertex3f(s, s, s)
+        glVertex3f(-s, s, s)
+        # bottom face (-y)
+        glVertex3f(-s, -s, -s)
+        glVertex3f(-s, -s, s)
+        glVertex3f(s, -s, s)
+        glVertex3f(s, -s, -s)
+        # front (+z)
+        glVertex3f(-s, -s, s)
+        glVertex3f(-s, s, s)
+        glVertex3f(s, s, s)
+        glVertex3f(s, -s, s)
+        # back (-z)
+        glVertex3f(-s, -s, -s)
+        glVertex3f(s, -s, -s)
+        glVertex3f(s, s, -s)
+        glVertex3f(-s, s, -s)
+        # right (+x)
+        glVertex3f(s, -s, -s)
+        glVertex3f(s, -s, s)
+        glVertex3f(s, s, s)
+        glVertex3f(s, s, -s)
+        # left (-x)
+        glVertex3f(-s, -s, -s)
+        glVertex3f(-s, s, -s)
+        glVertex3f(-s, s, s)
+        glVertex3f(-s, -s, s)
+        glEnd()
+        glPopMatrix()
+
+
+# -----------------------------
+# Duel-only
+# -----------------------------
+MODE_ID = "duel"
+MODE_LABEL = "Duel (1v1, first to 5)"
 DUEL_MAPS = ["White Arena", "Blue Arena", "Black Arena", "Backrooms"]
-FFA_MAP_NAME = "FFA Black"  # uses big spawn ring in run_game
 
-
-# -----------------------------
-# Menu
-# -----------------------------
 
 def show_menu():
+    """
+    Responsive menu UI (the improved layout you liked).
+    Controls:
+      - UP/DOWN (or W/S): select bot
+      - LEFT/RIGHT (or A/D): select weapon
+      - Q/E: change map
+      - Z/X: decrease / increase difficulty (0..100)
+      - ENTER: start
+      - ESC: quit
+    Returns: MODE_ID, bot_choice, weapon_choice, map_choice, difficulty_value (0..100)
+    """
     pygame.init()
-    screen = pygame.display.set_mode((800, 600))
+    screen = pygame.display.set_mode((900, 700))
     pygame.display.set_caption("Blue Arena - Menu")
 
-    font_title = pygame.font.Font(None, 64)
-    font_option = pygame.font.Font(None, 32)
-    font_hint = pygame.font.Font(None, 24)
+    sw, sh = screen.get_size()
 
-    mode_index = 0  # 0 = duel, 1 = ffa
+    title_font_size = max(36, int(sh * 0.10))
+    option_font_size = max(20, int(sh * 0.055))
+    hint_font_size = max(16, int(sh * 0.035))
+
+    font_title = pygame.font.Font(None, title_font_size)
+    font_option = pygame.font.Font(None, option_font_size)
+    font_hint = pygame.font.Font(None, hint_font_size)
+
     bot_names = ["AK47 Bot", "Sniper Bot", "Shotgun Bot"]
     bot_index = 0
 
     weapon_names = list(WEAPON_DEFS.keys())
     weapon_index = 0
 
-    map_index = 0  # for Duel maps only
+    map_index = 0
 
+    difficulty_value = 50  # continuous 0..100
     clock = pygame.time.Clock()
     running = True
 
@@ -86,116 +175,149 @@ def show_menu():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit(0)
-
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     pygame.quit()
                     sys.exit(0)
-
-                elif event.key == pygame.K_TAB:
-                    mode_index = 1 - mode_index
-
                 elif event.key in (pygame.K_UP, pygame.K_w):
                     bot_index = (bot_index - 1) % len(bot_names)
                 elif event.key in (pygame.K_DOWN, pygame.K_s):
                     bot_index = (bot_index + 1) % len(bot_names)
-
                 elif event.key in (pygame.K_LEFT, pygame.K_a):
                     weapon_index = (weapon_index - 1) % len(weapon_names)
                 elif event.key in (pygame.K_RIGHT, pygame.K_d):
                     weapon_index = (weapon_index + 1) % len(weapon_names)
-
                 elif event.key == pygame.K_q:
-                    if MODE_IDS[mode_index] == "duel":
-                        map_index = (map_index - 1) % len(DUEL_MAPS)
+                    map_index = (map_index - 1) % len(DUEL_MAPS)
                 elif event.key == pygame.K_e:
-                    if MODE_IDS[mode_index] == "duel":
-                        map_index = (map_index + 1) % len(DUEL_MAPS)
-
+                    map_index = (map_index + 1) % len(DUEL_MAPS)
+                elif event.key == pygame.K_z:
+                    difficulty_value = max(0, difficulty_value - 2)
+                elif event.key == pygame.K_x:
+                    difficulty_value = min(100, difficulty_value + 2)
                 elif event.key == pygame.K_RETURN:
                     running = False
 
+        # Clear + dynamic layout recompute
         screen.fill((16, 18, 25))
+        sw, sh = screen.get_size()
+        center_x = sw // 2
 
-        mode_id = MODE_IDS[mode_index]
-        mode_label = MODE_LABELS[mode_id]
+        # Larger vertical spacing to avoid overlap
+        top_margin = int(sh * 0.06)
+        section_spacing = int(sh * 0.115)
+        small_spacing = int(sh * 0.02)
 
-        title_surf = pygame.font.Font(None, 64).render("BLUE ARENA", True, (220, 235, 255))
-        title_rect = title_surf.get_rect(center=(400, 80))
+        title_y = top_margin
+        mode_y = title_y + section_spacing
+        bot_y = mode_y + section_spacing
+        weapon_y = bot_y + section_spacing
+        map_y = weapon_y + section_spacing
+        slider_y = map_y + section_spacing
+        hints_y = slider_y + int(section_spacing * 0.9)
+
+        slider_w = int(sw * 0.60)
+        slider_h = max(14, int(sh * 0.035))
+        slider_x = center_x - slider_w // 2
+
+        # Title
+        title_surf = font_title.render("BLUE ARENA", True, (220, 235, 255))
+        title_rect = title_surf.get_rect(center=(center_x, title_y + title_surf.get_height() // 2))
         screen.blit(title_surf, title_rect)
 
-        mode_surf = font_option.render(f"Mode: {mode_label}", True, (180, 200, 240))
-        mode_rect = mode_surf.get_rect(center=(400, 170))
+        # Mode
+        mode_surf = font_option.render(f"Mode: {MODE_LABEL}", True, (180, 200, 240))
+        mode_rect = mode_surf.get_rect(center=(center_x, mode_y + mode_surf.get_height() // 2))
         screen.blit(mode_surf, mode_rect)
 
+        # Bot selection
         bot_text = f"Bot: {bot_names[bot_index]}"
-        if mode_id == "ffa":
-            bot_text += " (RANDOM in FFA)"
         bot_surf = font_option.render(bot_text, True, (180, 200, 240))
-        bot_rect = bot_surf.get_rect(center=(400, 220))
+        bot_rect = bot_surf.get_rect(center=(center_x, bot_y + bot_surf.get_height() // 2))
         screen.blit(bot_surf, bot_rect)
 
+        # Weapon selection
         weapon_text = f"Primary: {weapon_names[weapon_index]}"
         weapon_surf = font_option.render(weapon_text, True, (180, 200, 240))
-        weapon_rect = weapon_surf.get_rect(center=(400, 270))
+        weapon_rect = weapon_surf.get_rect(center=(center_x, weapon_y + weapon_surf.get_height() // 2))
         screen.blit(weapon_surf, weapon_rect)
 
-        if mode_id == "duel":
-            map_name = DUEL_MAPS[map_index]
-        else:
-            map_name = FFA_MAP_NAME + " (HUGE!)"
+        # Map selection
+        map_name = DUEL_MAPS[map_index]
         map_text = f"Map: {map_name}"
         map_surf = font_option.render(map_text, True, (180, 200, 240))
-        map_rect = map_surf.get_rect(center=(400, 320))
+        map_rect = map_surf.get_rect(center=(center_x, map_y + map_surf.get_height() // 2))
         screen.blit(map_surf, map_rect)
 
-        hint_surf = font_hint.render(
-            "TAB: Mode   UP/DOWN: Bot   LEFT/RIGHT: Primary   Q/E: Map (Duel only)",
-            True,
-            (150, 170, 210),
-        )
-        hint_rect = hint_surf.get_rect(center=(400, 380))
-        screen.blit(hint_surf, hint_rect)
+        # Difficulty slider UI
+        outer_rect = pygame.Rect(slider_x - 4, slider_y - 4, slider_w + 8, slider_h + 8)
+        pygame.draw.rect(screen, (24, 26, 32), outer_rect, border_radius=8)
+        pygame.draw.rect(screen, (40, 44, 60), (slider_x, slider_y, slider_w, slider_h), border_radius=8)
 
-        controls_surf = font_hint.render(
-            "In game: 1=Primary 2=Pistol RMB=Aim LMB=Fire R=Reload TAB=Scores(FFA)",
-            True,
-            (140, 160, 200),
-        )
-        controls_rect = controls_surf.get_rect(center=(400, 410))
-        screen.blit(controls_surf, controls_rect)
+        fill_w = int(slider_w * (difficulty_value / 100.0))
+        pygame.draw.rect(screen, (96, 160, 255), (slider_x, slider_y, fill_w, slider_h), border_radius=8)
 
-        start_surf = font_hint.render(
-            "ENTER: Start   ESC: Quit",
-            True,
-            (170, 190, 220),
+        knob_x = slider_x + fill_w
+        knob_radius = max(8, int(slider_h * 0.9))
+        pygame.draw.circle(
+            screen,
+            (220, 220, 220),
+            (max(slider_x + 2, min(slider_x + slider_w - 2, knob_x)), slider_y + slider_h // 2),
+            max(4, knob_radius // 2),
         )
-        start_rect = start_surf.get_rect(center=(400, 450))
-        screen.blit(start_surf, start_rect)
+
+        # Difficulty label
+        percent_txt = font_option.render(f"Difficulty: {difficulty_value}%", True, (200, 220, 255))
+        pct_rect = percent_txt.get_rect(center=(center_x, slider_y - int(slider_h * 1.6)))
+        screen.blit(percent_txt, pct_rect)
+
+        # Tag
+        if difficulty_value < 33:
+            tag = "Very Easy"
+        elif difficulty_value < 66:
+            tag = "Normal (previous Hard)"
+        else:
+            tag = "Very Hard"
+        tag_txt = font_hint.render(tag, True, (220, 220, 220))
+        tag_rect = tag_txt.get_rect(center=(center_x, slider_y + slider_h + int(small_spacing * 1.4)))
+        screen.blit(tag_txt, tag_rect)
+
+        # Ticks
+        tick_values = [0, 25, 50, 75, 100]
+        tick_margin = max(8, int(slider_w * 0.006))
+        for v in tick_values:
+            tx = slider_x + int(slider_w * (v / 100.0))
+            tx = max(slider_x + tick_margin, min(slider_x + slider_w - tick_margin, tx))
+            pygame.draw.line(screen, (200, 200, 200), (tx, slider_y), (tx, slider_y + slider_h), 2)
+            txt = font_hint.render(str(v), True, (220, 220, 220))
+            txt_rect = txt.get_rect(center=(tx, slider_y + slider_h + int(small_spacing * 3)))
+            screen.blit(txt, txt_rect)
+
+        # Hints
+        hint_lines = [
+            "Z/X: Difficulty    UP/DOWN: Bot    LEFT/RIGHT: Primary    Q/E: Map",
+            "In game: 1=Primary  2=Pistol   RMB=Aim   LMB=Fire   R=Reload   ENTER: Start",
+        ]
+        base_hint_y = hints_y + int(small_spacing * 2)
+        for i, line in enumerate(hint_lines):
+            hint_surf = font_hint.render(line, True, (150, 170, 210))
+            hint_rect = hint_surf.get_rect(center=(center_x, base_hint_y + i * (hint_surf.get_height() + 6)))
+            screen.blit(hint_surf, hint_rect)
 
         pygame.display.flip()
         clock.tick(60)
 
-    mode_id = MODE_IDS[mode_index]
     bot_choice = bot_names[bot_index]
     weapon_choice = weapon_names[weapon_index]
-    if mode_id == "duel":
-        map_choice = DUEL_MAPS[map_index]
-    else:
-        map_choice = FFA_MAP_NAME
+    map_choice = DUEL_MAPS[map_index]
 
     pygame.quit()
-    return mode_id, bot_choice, weapon_choice, map_choice
+    return MODE_ID, bot_choice, weapon_choice, map_choice, difficulty_value
 
-
-# -----------------------------
-# HP + Scoreboard overlay (Duel)
-# -----------------------------
 
 def draw_health_and_score(
         player: Player,
-        bot: Bot | None,
-        mode_id: str,
+        bot: Bot,
         player_kills: int,
         bot_kills: int,
         player_wins: int,
@@ -214,9 +336,7 @@ def draw_health_and_score(
 
     max_hp = 100.0
     p_hp = max(0.0, min(max_hp, player.health))
-    b_hp = max_hp
-    if bot is not None:
-        b_hp = max(0.0, min(max_hp, bot.health))
+    b_hp = max(0.0, min(max_hp, bot.health))
 
     bar_w = 220
     bar_h = 18
@@ -250,221 +370,111 @@ def draw_health_and_score(
     glVertex2f(x, y + bar_h)
     glEnd()
 
-    if mode_id == "duel" and bot is not None:
-        x2 = WIDTH - margin - bar_w
-        y2 = HEIGHT - margin - bar_h
+    x2 = WIDTH - margin - bar_w
+    y2 = HEIGHT - margin - bar_h
+    glColor3f(0.08, 0.08, 0.08)
+    glBegin(GL_QUADS)
+    glVertex2f(x2, y2)
+    glVertex2f(x2 + bar_w, y2)
+    glVertex2f(x2 + bar_w, y2 + bar_h)
+    glVertex2f(x2, y2 + bar_h)
+    glEnd()
 
-        glColor3f(0.08, 0.08, 0.08)
-        glBegin(GL_QUADS)
-        glVertex2f(x2, y2)
-        glVertex2f(x2 + bar_w, y2)
-        glVertex2f(x2 + bar_w, y2 + bar_h)
-        glVertex2f(x2, y2 + bar_h)
-        glEnd()
+    fill_w2 = bar_w * (b_hp / max_hp)
+    glColor3f(0.9, 0.25, 0.25)
+    glBegin(GL_QUADS)
+    glVertex2f(x2, y2)
+    glVertex2f(x2 + fill_w2, y2)
+    glVertex2f(x2 + fill_w2, y2 + bar_h)
+    glVertex2f(x2, y2 + bar_h)
+    glEnd()
 
-        fill_w2 = bar_w * (b_hp / max_hp)
-        glColor3f(0.9, 0.25, 0.25)
-        glBegin(GL_QUADS)
-        glVertex2f(x2, y2)
-        glVertex2f(x2 + fill_w2, y2)
-        glVertex2f(x2 + fill_w2, y2 + bar_h)
-        glVertex2f(x2, y2 + bar_h)
-        glEnd()
+    glColor3f(0.0, 0.0, 0.0)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(x2, y2)
+    glVertex2f(x2 + bar_w, y2)
+    glVertex2f(x2 + bar_w, y2 + bar_h)
+    glVertex2f(x2, y2 + bar_h)
+    glEnd()
 
-        glColor3f(0.0, 0.0, 0.0)
-        glBegin(GL_LINE_LOOP)
-        glVertex2f(x2, y2)
-        glVertex2f(x2 + bar_w, y2)
-        glVertex2f(x2 + bar_w, y2 + bar_h)
-        glVertex2f(x2, y2 + bar_h)
-        glEnd()
-
-        sq = 10
-        gap = 4
-        ky = y - sq - 6
-        kx = x
-        for i in range(5):
-            if i < player_kills:
-                glColor3f(0.2, 0.9, 0.2)
-            else:
-                glColor3f(0.15, 0.3, 0.15)
-            sx0 = kx + i * (sq + gap)
-            sy0 = ky
-            glBegin(GL_QUADS)
-            glVertex2f(sx0, sy0)
-            glVertex2f(sx0 + sq, sy0)
-            glVertex2f(sx0 + sq, sy0 + sq)
-            glVertex2f(sx0, sy0 + sq)
-            glEnd()
-
-        ky2 = y2 - sq - 6
-        kx2 = x2 + bar_w - 5 * (sq + gap)
-        for i in range(5):
-            if i < bot_kills:
-                glColor3f(0.9, 0.25, 0.25)
-            else:
-                glColor3f(0.3, 0.15, 0.15)
-            sx0 = kx2 + i * (sq + gap)
-            sy0 = ky2
-            glBegin(GL_QUADS)
-            glVertex2f(sx0, sy0)
-            glVertex2f(sx0 + sq, sy0)
-            glVertex2f(sx0 + sq, sy0 + sq)
-            glVertex2f(sx0, sy0 + sq)
-            glEnd()
-
-        wr_w = 160
-        wr_h = 10
-        wr_x = (WIDTH - wr_w) / 2
-        wr_y = HEIGHT - margin - bar_h - 28
-
-        glColor3f(0.08, 0.08, 0.08)
-        glBegin(GL_QUADS)
-        glVertex2f(wr_x, wr_y)
-        glVertex2f(wr_x + wr_w, wr_y)
-        glVertex2f(wr_x + wr_w, wr_y + wr_h)
-        glVertex2f(wr_x, wr_y + wr_h)
-        glEnd()
-
-        win_rate = 0.0
-        if matches_played > 0:
-            win_rate = max(0.0, min(1.0, player_wins / matches_played))
-
-        fill_wr = wr_w * win_rate
-        glColor3f(0.25, 0.5, 0.95)
-        glBegin(GL_QUADS)
-        glVertex2f(wr_x, wr_y)
-        glVertex2f(wr_x + fill_wr, wr_y)
-        glVertex2f(wr_x + fill_wr, wr_y + wr_h)
-        glVertex2f(wr_x, wr_y + wr_h)
-        glEnd()
-
-        glColor3f(0.0, 0.0, 0.0)
-        glBegin(GL_LINE_LOOP)
-        glVertex2f(wr_x, wr_y)
-        glVertex2f(wr_x + wr_w, wr_y)
-        glVertex2f(wr_x + wr_w, wr_y + wr_h)
-        glVertex2f(wr_x, wr_y + wr_h)
-        glEnd()
-
-    glEnable(GL_DEPTH_TEST)
-
-    glPopMatrix()
-    glMatrixMode(GL_PROJECTION)
-    glPopMatrix()
-    glMatrixMode(GL_MODELVIEW)
-
-
-# -----------------------------
-# Leaderboard overlay (FFA)
-# -----------------------------
-
-def draw_leaderboard(kill_counts, show_full=False):
-    glMatrixMode(GL_PROJECTION)
-    glPushMatrix()
-    glLoadIdentity()
-    glOrtho(0, WIDTH, 0, HEIGHT, -1, 1)
-
-    glMatrixMode(GL_MODELVIEW)
-    glPushMatrix()
-    glLoadIdentity()
-
-    glDisable(GL_DEPTH_TEST)
-
-    sorted_entries = sorted(kill_counts.items(), key=lambda x: x[1], reverse=True)
-
-    if show_full:
-        panel_w = 400
-        panel_h = 450
-        panel_x = (WIDTH - panel_w) / 2
-        panel_y = (HEIGHT - panel_h) / 2
-
-        glColor4f(0.0, 0.0, 0.0, 0.85)
-        glBegin(GL_QUADS)
-        glVertex2f(panel_x, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y + panel_h)
-        glVertex2f(panel_x, panel_y + panel_h)
-        glEnd()
-
-        glColor3f(0.3, 0.5, 0.9)
-        glLineWidth(3.0)
-        glBegin(GL_LINE_LOOP)
-        glVertex2f(panel_x, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y + panel_h)
-        glVertex2f(panel_x, panel_y + panel_h)
-        glEnd()
-
-    else:
-        panel_w = 200
-        panel_h = 160
-        panel_x = WIDTH - panel_w - 20
-        panel_y = HEIGHT - panel_h - 20
-
-        glColor4f(0.0, 0.0, 0.0, 0.7)
-        glBegin(GL_QUADS)
-        glVertex2f(panel_x, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y + panel_h)
-        glVertex2f(panel_x, panel_y + panel_h)
-        glEnd()
-
-        glColor3f(0.5, 0.5, 0.5)
-        glLineWidth(1.5)
-        glBegin(GL_LINE_LOOP)
-        glVertex2f(panel_x, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y)
-        glVertex2f(panel_x + panel_w, panel_y + panel_h)
-        glVertex2f(panel_x, panel_y + panel_h)
-        glEnd()
-
-    glEnable(GL_DEPTH_TEST)
-
-    glPopMatrix()
-    glMatrixMode(GL_PROJECTION)
-    glPopMatrix()
-    glMatrixMode(GL_MODELVIEW)
-
-    font_size = 22 if show_full else 18
-    font = pygame.font.Font(None, font_size)
-
-    if show_full:
-        title = font.render("LEADERBOARD", True, (255, 255, 255))
-        title_x = int((WIDTH - title.get_width()) / 2)
-        title_y = int((HEIGHT - panel_h) / 2 + 15)
-    else:
-        title = font.render("TOP 5", True, (220, 220, 220))
-        title_x = int(WIDTH - panel_w + 15)
-        title_y = int(HEIGHT - panel_h + 8)
-
-    screen = pygame.display.get_surface()
-    screen.blit(title, (title_x, title_y))
-
-    max_display = len(sorted_entries) if show_full else min(5, len(sorted_entries))
-
-    for i, (name, kills) in enumerate(sorted_entries[:max_display]):
-        color = (255, 215, 0) if i == 0 else (220, 220, 220)
-        text = font.render(f"{i + 1}. {name}: {kills}", True, color)
-
-        if show_full:
-            text_x = int((WIDTH - panel_w) / 2 + 25)
-            text_y = int((HEIGHT - panel_h) / 2 + 55 + i * 32)
+    sq = 10
+    gap = 4
+    ky = y - sq - 6
+    kx = x
+    for i in range(5):
+        if i < player_kills:
+            glColor3f(0.2, 0.9, 0.2)
         else:
-            text_x = int(WIDTH - panel_w + 15)
-            text_y = int(HEIGHT - panel_h + 38 + i * 26)
+            glColor3f(0.15, 0.3, 0.15)
+        sx0 = kx + i * (sq + gap)
+        sy0 = ky
+        glBegin(GL_QUADS)
+        glVertex2f(sx0, sy0)
+        glVertex2f(sx0 + sq, sy0)
+        glVertex2f(sx0 + sq, sy0 + sq)
+        glVertex2f(sx0, sy0 + sq)
+        glEnd()
 
-        screen.blit(text, (text_x, text_y))
+    ky2 = y2 - sq - 6
+    kx2 = x2 + bar_w - 5 * (sq + gap)
+    for i in range(5):
+        if i < bot_kills:
+            glColor3f(0.9, 0.25, 0.25)
+        else:
+            glColor3f(0.3, 0.15, 0.15)
+        sx0 = kx2 + i * (sq + gap)
+        sy0 = ky2
+        glBegin(GL_QUADS)
+        glVertex2f(sx0, sy0)
+        glVertex2f(sx0 + sq, sy0)
+        glVertex2f(sx0 + sq, sy0 + sq)
+        glVertex2f(sx0, sy0 + sq)
+        glEnd()
+
+    wr_w = 160
+    wr_h = 10
+    wr_x = (WIDTH - wr_w) / 2
+    wr_y = HEIGHT - margin - bar_h - 28
+
+    glColor3f(0.08, 0.08, 0.08)
+    glBegin(GL_QUADS)
+    glVertex2f(wr_x, wr_y)
+    glVertex2f(wr_x + wr_w, wr_y)
+    glVertex2f(wr_x + wr_w, wr_y + wr_h)
+    glVertex2f(wr_x, wr_y + wr_h)
+    glEnd()
+
+    win_rate = 0.0
+    if matches_played > 0:
+        win_rate = max(0.0, min(1.0, player_wins / matches_played))
+    fill_wr = wr_w * win_rate
+    glColor3f(0.25, 0.5, 0.95)
+    glBegin(GL_QUADS)
+    glVertex2f(wr_x, wr_y)
+    glVertex2f(wr_x + fill_wr, wr_y)
+    glVertex2f(wr_x + fill_wr, wr_y + wr_h)
+    glVertex2f(wr_x, wr_y + wr_h)
+    glEnd()
+
+    glColor3f(0.0, 0.0, 0.0)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(wr_x, wr_y)
+    glVertex2f(wr_x + wr_w, wr_y)
+    glVertex2f(wr_x + wr_w, wr_y + wr_h)
+    glVertex2f(wr_x, wr_y + wr_h)
+    glEnd()
+
+    glEnable(GL_DEPTH_TEST)
+
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
 
 
-# -----------------------------
-# Game loop
-# -----------------------------
-
-def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_name: str):
+def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_name: str, difficulty_value: int):
     pygame.init()
     pygame.display.set_caption("Blue Arena Shooter")
-
     pygame.display.set_mode((WIDTH, HEIGHT), DOUBLEBUF | OPENGL)
     glEnable(GL_DEPTH_TEST)
 
@@ -486,90 +496,36 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
 
     build_map_geometry(map_name)
 
-    # -----------------
-    # Spawns + actors
-    # -----------------
+    # Spawns + actors (duel)
+    player_candidates = [
+        Vector3(-9.0, 1.0, -9.0),
+        Vector3(-9.0, 1.0, 9.0),
+        Vector3(9.0, 1.0, -9.0),
+        Vector3(9.0, 1.0, 9.0),
+        Vector3(-7.0, 1.0, 0.0),
+        Vector3(7.0, 1.0, 0.0),
+    ]
+    bot_candidates = [
+        Vector3(9.0, 1.0, 9.0),
+        Vector3(9.0, 1.0, -9.0),
+        Vector3(-9.0, 1.0, 9.0),
+        Vector3(7.0, 1.0, 0.0),
+    ]
 
-    if mode_id == "duel":
-        player_candidates = [
-            Vector3(-9.0, 1.0, -9.0),
-            Vector3(-9.0, 1.0, 9.0),
-            Vector3(9.0, 1.0, -9.0),
-            Vector3(9.0, 1.0, 9.0),
-            Vector3(-7.0, 1.0, 0.0),
-            Vector3(7.0, 1.0, 0.0),
-        ]
-        bot_candidates = [
-            Vector3(9.0, 1.0, 9.0),
-            Vector3(9.0, 1.0, -9.0),
-            Vector3(-9.0, 1.0, 9.0),
-            Vector3(7.0, 1.0, 0.0),
-        ]
+    player_start = find_safe_spawn(player_candidates, radius=0.55)
+    bot_start = find_safe_spawn(bot_candidates, radius=0.55)
 
-        player_start = find_safe_spawn(player_candidates, radius=0.55)
-        bot_start = find_safe_spawn(bot_candidates, radius=0.55)
-
-        player = Player(pos=player_start, start_weapon=start_weapon_name)
-        bot_profile = AI_PROFILES.get(bot_profile_name, AI_PROFILES["AK47 Bot"])
-        bots = [Bot(pos=bot_start, profile=bot_profile)]
-
-        duel_bot_spawn_points = bot_candidates
-        ffa_bot_spawn_points = None
-        ffa_player_spawn_points = None
-
-    else:  # FFA
-        # Big ring of 10 spawn locations
-        spawn_points = [
-            Vector3(-24.0, 1.0, -24.0),
-            Vector3(24.0, 1.0, -24.0),
-            Vector3(-24.0, 1.0, 24.0),
-            Vector3(24.0, 1.0, 24.0),
-            Vector3(0.0, 1.0, -28.0),
-            Vector3(0.0, 1.0, 28.0),
-            Vector3(-28.0, 1.0, 0.0),
-            Vector3(28.0, 1.0, 0.0),
-            Vector3(-14.0, 1.0, -14.0),
-            Vector3(14.0, 1.0, 14.0),
-        ]
-
-        player_start = find_safe_spawn(spawn_points, radius=0.55)
-        player = Player(pos=player_start, start_weapon=start_weapon_name)
-
-        bots = []
-        weapon_choices = list(WEAPON_DEFS.keys())
-
-        for i in range(10):
-            pos = find_safe_spawn(spawn_points, radius=0.55)
-            random_weapon = random.choice(weapon_choices)
-
-            profile = AIProfile(
-                name=f"Bot{i + 1}",
-                weapon=random_weapon,
-                move_speed=random.uniform(5.5, 8.0),
-                preferred_min=random.uniform(4.0, 8.0),
-                preferred_max=random.uniform(10.0, 18.0),
-                aim_time=random.uniform(0.2, 0.5),
-                accuracy=random.uniform(0.65, 0.9),
-                aggression=random.uniform(0.5, 1.0),
-            )
-
-            bot = Bot(pos=pos, profile=profile)
-            bot.bot_id = i
-            bots.append(bot)
-
-        duel_bot_spawn_points = None
-        ffa_bot_spawn_points = spawn_points
-        ffa_player_spawn_points = spawn_points
+    player = Player(pos=player_start, start_weapon=start_weapon_name)
+    bot_profile = AI_PROFILES.get(bot_profile_name, AI_PROFILES["AK47 Bot"])
+    bots = [Bot(pos=bot_start, profile=bot_profile)]
 
     player_spawn = player.pos.copy()
-    if mode_id == "duel":
-        bot_spawn = bots[0].pos.copy()
-    else:
-        bot_spawn = None
+    bot_spawn = bots[0].pos.copy()
 
     projectiles = []
     flashes = []
     shells = []
+    explosions = []
 
     # Stats
     player_kills = 0
@@ -577,57 +533,107 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
     player_wins = 0
     matches_played = 0
 
-    # FFA leaderboard
-    kill_counts = {}
-    if mode_id == "ffa":
-        kill_counts = {"You": 0}
-        for i in range(10):
-            kill_counts[f"Bot{i + 1}"] = 0
-
     last_time = pygame.time.get_ticks() / 1000.0
-    left_mouse_down = False
-    show_leaderboard_full = False
-    running = True
 
+    # Map difficulty mapping
+    d_raw = float(difficulty_value) / 100.0
+    exponent = 0.46
+    d = d_raw ** exponent
+
+    # Parameter ranges
+    acc_low, acc_high = 0.45, 1.45
+    speed_low, speed_high = 0.65, 1.25
+    aim_time_long, aim_time_short = 1.25, 0.05
+    shoot_chance_low, shoot_chance_high = 0.35, 1.25
+    peek_mult_low, peek_mult_high = 0.45, 1.35
+    tactical_threshold_low, tactical_threshold_high = 1.4, 0.7
+
+    acc_mult = acc_low + (acc_high - acc_low) * d
+    speed_mult = speed_low + (speed_high - speed_low) * d
+    aim_time_base = aim_time_long + (aim_time_short - aim_time_long) * d
+    shoot_chance_mult = shoot_chance_low + (shoot_chance_high - shoot_chance_low) * d
+    peek_mult = peek_mult_low + (peek_mult_high - peek_mult_low) * d
+    tactical_threshold_mult = tactical_threshold_low + (tactical_threshold_high - tactical_threshold_low) * d
+
+    for b in bots:
+        b.profile.accuracy = max(0.02, min(1.0, b.profile.accuracy * acc_mult))
+        b.profile.move_speed = max(1.0, b.profile.move_speed * speed_mult)
+        if hasattr(b.profile, "aggression"):
+            b.profile.aggression = max(0.0, min(1.0, getattr(b.profile, "aggression", 0.7) * (0.85 + d * 0.3)))
+
+    # Smarter bot AI setup
+    now_init = pygame.time.get_ticks() / 1000.0
+    bot_ai_rand = {
+        "strafe_dir": random.choice([-1, 1]),
+        "next_strafe_switch": now_init + random.uniform(0.7, 2.2),
+        "pause_until": 0.0,
+        "is_paused": False,
+        "zigzag_active": False,
+        "next_zigzag_time": now_init + random.uniform(2, 6),
+        "peek_cooldown_until": now_init + random.uniform(0.5, 1.5),
+        "is_peeking": False,
+        "peek_end": 0.0,
+        "is_reloading_tactical": False,
+        "reload_backoff_until": 0.0,
+        "panic_until": 0.0,
+        "is_aiming": False,
+        "aim_end_time": 0.0,
+        "aim_target_dir": Vector3(0, 0, -1),
+    }
+
+    left_mouse_down = False
+    running = True
+    user_requested_quit = False
+
+    # helper: create explosion cube and apply immediate touch damage
+    def create_explosion_cube(pos: Vector3, target_size: float, owner: str):
+        nonlocal player_kills, bot_kills
+        cube = ExplosionCube(pos, start_size=0.2, target_size=max(0.6, target_size), lifetime=0.45, owner=owner)
+        explosions.append(cube)
+        # immediate touch damage if touching right away
+        if cube.contains_actor(player.pos, player.radius) and not cube.damaged_player:
+            player.health -= 50.0
+            cube.damaged_player = True
+            if player.health <= 0 and owner == "bot":
+                bot_kills += 1
+        for i, other in enumerate(bots):
+            if other.health <= 0:
+                continue
+            if cube.contains_actor(other.pos, other.radius) and i not in cube.damaged_bots:
+                other.health -= 50.0
+                cube.damaged_bots.add(i)
+                if other.health <= 0 and owner == "player":
+                    player_kills += 1
+
+    # main loop
     while running:
         now = pygame.time.get_ticks() / 1000.0
         dt = max(0.0001, now - last_time)
         last_time = now
 
-        # -----------------
-        # Input
-        # -----------------
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-
+                user_requested_quit = True
             elif event.type == pygame.KEYDOWN:
                 if event.key == K_ESCAPE:
                     running = False
-
+                    user_requested_quit = True
                 elif event.key == K_r:
                     player.weapon.start_reload(now)
-
                 elif event.key == K_1:
                     player.switch_to_primary()
                 elif event.key == K_2:
                     player.switch_to_secondary()
-
                 elif event.key == K_SPACE:
                     if player.on_ground:
                         player.vel_y = 6.0
                         player.on_ground = False
-
-                elif event.key == K_TAB:
-                    if mode_id == "ffa":
-                        show_leaderboard_full = not show_leaderboard_full
-
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     left_mouse_down = True
                 elif event.button == 3:
                     player.is_aiming = True
-
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
                     left_mouse_down = False
@@ -662,7 +668,6 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
             move_vec = move_dir * speed * dt
             player.pos = move_with_collisions(player.pos, move_vec, player.radius)
 
-        # Gravity / jump
         if not player.on_ground:
             player.vel_y -= 12.0 * dt
             player.jump_offset += player.vel_y * dt
@@ -686,18 +691,16 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
             )
             if new_proj:
                 for p in new_proj:
-                    for enemy in bots:
-                        if enemy.health <= 0:
-                            continue
-                        if ray_hits_actor(p.origin, p.direction, player.weapon.stats.range, enemy):
-                            was_alive = enemy.health > 0
-                            enemy.health -= p.damage
-                            if was_alive and enemy.health <= 0:
-                                if mode_id == "duel":
+                    # Immediate hits for hitscan projectiles only
+                    if getattr(p, "is_hitscan", True):
+                        for enemy in bots:
+                            if enemy.health <= 0:
+                                continue
+                            if ray_hits_actor(p.origin, p.direction, player.weapon.stats.range, enemy):
+                                was_alive = enemy.health > 0
+                                enemy.health -= p.damage
+                                if was_alive and enemy.health <= 0:
                                     player_kills += 1
-                                else:
-                                    kill_counts["You"] += 1
-
                 projectiles.extend(new_proj)
                 if new_flash:
                     flashes.append(new_flash)
@@ -711,140 +714,25 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
                     shells.append(new_shell)
 
         # -----------------
-        # Bot AI
+        # Bot AI (duel)
         # -----------------
-        for bot_index, b in enumerate(bots):
+        for bot_index_local, b in enumerate(bots):
             if b.health <= 0:
                 continue
-
-            if mode_id == "duel":
-                # Duel: use original state-machine AI against player only
+            if hasattr(b, "update_ai"):
                 ai_proj, ai_flash, ai_shell = b.update_ai(dt, now, player)
-
                 if ai_proj:
-                    if b._has_line_of_sight(player):
+                    hitscan_proj = [p for p in ai_proj if getattr(p, "is_hitscan", True)]
+                    if hitscan_proj and b._has_line_of_sight(player):
                         to_player = player.pos - b.pos
                         dist = to_player.length()
                         if dist <= b.weapon.stats.range:
-                            total_damage = sum(p.damage for p in ai_proj) * 1.2
+                            total_damage = sum(p.damage for p in hitscan_proj) * 1.2
                             was_alive = player.health > 0
                             player.health -= total_damage
                             if was_alive and player.health <= 0:
                                 bot_kills += 1
                     projectiles.extend(ai_proj)
-
-                if ai_flash:
-                    flashes.append(ai_flash)
-                if ai_shell:
-                    jitter = Vector3(
-                        (random.random() - 0.5) * 0.6,
-                        (random.random() - 0.5) * 0.4,
-                        (random.random() - 0.5) * 0.6,
-                    )
-                    ai_shell.vel += jitter
-                    shells.append(ai_shell)
-
-            else:
-                # -------- FFA: simple bot-vs-bot + player AI ----------
-                closest_target = None
-                closest_dist = 999999.0
-
-                # Consider player
-                if player.health > 0:
-                    to_player = player.pos - b.pos
-                    d = to_player.length()
-                    if d < closest_dist:
-                        closest_dist = d
-                        closest_target = player
-
-                # Consider other bots
-                for other_index, other_bot in enumerate(bots):
-                    if other_index == bot_index or other_bot.health <= 0:
-                        continue
-                    to_other = other_bot.pos - b.pos
-                    d = to_other.length()
-                    if d < closest_dist:
-                        closest_dist = d
-                        closest_target = other_bot
-
-                if closest_target is None:
-                    continue
-
-                # Update weapon reloads / timers
-                b.weapon.update(now)
-
-                # Direction to target
-                to_tgt = closest_target.pos - b.pos
-                dist = to_tgt.length()
-                if dist > 0:
-                    dir_to_tgt = to_tgt.normalize()
-                else:
-                    dir_to_tgt = Vector3(0, 0, -1)
-
-                # Face target
-                b.yaw = math.degrees(math.atan2(dir_to_tgt.x, -dir_to_tgt.z))
-
-                # Movement: keep preferred distance + strafe
-                move_vec = Vector3(0, 0, 0)
-                if dist > b.profile.preferred_max:
-                    move_vec += dir_to_tgt          # move in
-                elif dist < b.profile.preferred_min:
-                    move_vec -= dir_to_tgt          # back up
-
-                # Strafe left/right
-                right = Vector3(-dir_to_tgt.z, 0, dir_to_tgt.x)
-                if right.length() > 0:
-                    right = right.normalize()
-                    strafe_sign = 1.0 if (int(now * 1.5 + bot_index) % 2 == 0) else -1.0
-                    move_vec += right * strafe_sign * 0.4
-
-                if move_vec.length() > 0:
-                    move_vec = move_vec.normalize()
-                    move_vec *= b.profile.move_speed * dt
-                    b.pos = move_with_collisions(b.pos, move_vec, b.radius)
-
-                ai_proj = []
-                ai_flash = None
-                ai_shell = None
-
-                # Fire only if we see the target and are in range
-                if b._has_line_of_sight(closest_target) and dist <= b.weapon.stats.range * 1.05:
-                    origin = b.pos + Vector3(0, 0.8, 0)
-
-                    acc = b.profile.accuracy
-                    if random.random() <= acc:
-                        aim_dir = dir_to_tgt
-                    else:
-                        aim_dir = Vector3(
-                            dir_to_tgt.x + (random.random() * 2 - 1) * 0.35,
-                            dir_to_tgt.y + (random.random() * 2 - 1) * 0.12,
-                            dir_to_tgt.z + (random.random() * 2 - 1) * 0.35,
-                        )
-                        if aim_dir.length() == 0:
-                            aim_dir = dir_to_tgt
-                        else:
-                            aim_dir = aim_dir.normalize()
-
-                    ai_proj, ai_flash, ai_shell = b.weapon.try_fire(
-                        now, origin, aim_dir,
-                        is_aiming=True,
-                        from_player=False,
-                    )
-
-                if ai_proj:
-                    # Simple hitscan-style damage on the chosen target
-                    total_damage = sum(p.damage for p in ai_proj) * 1.2
-                    was_alive = closest_target.health > 0
-                    closest_target.health -= total_damage
-
-                    if was_alive and closest_target.health <= 0:
-                        killer_name = b.profile.name
-                        if killer_name not in kill_counts:
-                            kill_counts[killer_name] = 0
-                        kill_counts[killer_name] += 1
-
-                    projectiles.extend(ai_proj)
-
                 if ai_flash:
                     flashes.append(ai_flash)
                 if ai_shell:
@@ -857,17 +745,68 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
                     shells.append(ai_shell)
 
         # -----------------
-        # Update visual FX
+        # Update projectiles & check impacts. Ignore owner collisions briefly after spawn.
         # -----------------
+        owner_grace = 0.12  # seconds to ignore owner collisions after spawn
+        new_projectile_list = []
         for p in projectiles:
             p.age += dt
             p.origin += p.direction * p.speed * dt
-        projectiles = [p for p in projectiles if p.age <= p.lifetime]
 
+            if not getattr(p, "is_hitscan", True):
+                impacted = False
+                # world collision
+                check_radius = 0.15
+                for ob in OBSTACLES:
+                    min_x = min(ob.x1, ob.x2) - check_radius
+                    max_x = max(ob.x1, ob.x2) + check_radius
+                    min_z = min(ob.z1, ob.z2) - check_radius
+                    max_z = max(ob.z1, ob.z2) + check_radius
+                    if (min_x <= p.origin.x <= max_x) and (min_z <= p.origin.z <= max_z):
+                        create_explosion_cube(p.origin, target_size=(p.explosion_radius or 1.6), owner=(p.owner or "bot"))
+                        impacted = True
+                        break
+                if impacted:
+                    continue
+
+                # player collision (skip if owner is player and within grace time)
+                if player.health > 0:
+                    if not (p.owner == "player" and (now - p.creation_time) < owner_grace):
+                        to_player = player.pos - p.origin
+                        if to_player.length() <= (player.radius + 0.25):
+                            create_explosion_cube(p.origin, target_size=(p.explosion_radius or 1.6), owner=(p.owner or "bot"))
+                            continue
+
+                # bots collision (skip their own rockets during grace)
+                hit_bot = False
+                for i, other in enumerate(bots):
+                    if other.health <= 0:
+                        continue
+                    if not (p.owner == "bot" and (now - p.creation_time) < owner_grace):
+                        to_bot = other.pos - p.origin
+                        if to_bot.length() <= (other.radius + 0.25):
+                            create_explosion_cube(p.origin, target_size=(p.explosion_radius or 1.6), owner=(p.owner or "player"))
+                            hit_bot = True
+                            break
+                if hit_bot:
+                    continue
+
+                # keep rocket alive until lifetime
+                if p.age <= p.lifetime:
+                    new_projectile_list.append(p)
+            else:
+                # keep hitscan visuals
+                if p.age <= p.lifetime:
+                    new_projectile_list.append(p)
+
+        projectiles = new_projectile_list
+
+        # update flashes
         for f in flashes:
             f.age += dt
         flashes = [f for f in flashes if f.age <= f.lifetime]
 
+        # update shells
         for s in shells:
             s.age += dt
             s.vel.y -= 9.8 * dt
@@ -924,55 +863,69 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
 
         shells = [s for s in shells if s.age <= s.lifetime]
 
-        # -----------------
-        # Respawns
-        # -----------------
-        if mode_id == "duel":
-            b = bots[0]
-            if b.health <= 0:
-                b.health = 100.0
-                b.pos = bot_spawn.copy()
-        else:
-            for b in bots:
-                if b.health <= 0:
-                    b.health = 100.0
-                    if ffa_bot_spawn_points:
-                        b.pos = find_safe_spawn(ffa_bot_spawn_points, radius=b.radius)
+        # update explosions: grow and apply damage once per actor when they touch
+        new_explosions = []
+        for ex in explosions:
+            ex.update(dt)
+            # player
+            if not ex.damaged_player and player.health > 0 and ex.contains_actor(player.pos, player.radius):
+                player.health -= 50.0
+                ex.damaged_player = True
+                if player.health <= 0 and ex.owner == "bot":
+                    bot_kills += 1
+            # bots
+            for i, other in enumerate(bots):
+                if other.health <= 0:
+                    continue
+                if i in ex.damaged_bots:
+                    continue
+                if ex.contains_actor(other.pos, other.radius):
+                    other.health -= 50.0
+                    ex.damaged_bots.add(i)
+                    if other.health <= 0 and ex.owner == "player":
+                        player_kills += 1
+            if ex.age <= ex.lifetime:
+                new_explosions.append(ex)
+        explosions = new_explosions
 
+        # respawns
+        if bots:
+            b0 = bots[0]
+            if b0.health <= 0:
+                b0.health = 100.0
+                b0.pos = bot_spawn.copy()
         if player.health <= 0:
             player.health = 100.0
-            if mode_id == "duel":
-                player.pos = player_spawn.copy()
-            else:
-                if ffa_player_spawn_points:
-                    player.pos = find_safe_spawn(ffa_player_spawn_points, radius=player.radius)
+            player.pos = player_spawn.copy()
             player.jump_offset = 0.0
             player.vel_y = 0.0
             player.on_ground = True
 
-        # -----------------
-        # Duel win condition
-        # -----------------
-        if mode_id == "duel":
-            if player_kills >= 5 or bot_kills >= 5:
-                matches_played += 1
-                if player_kills >= 5:
-                    player_wins += 1
+        # duel match tracking
+        if player_kills >= 5 or bot_kills >= 5:
+            matches_played += 1
+            if player_kills >= 5:
+                player_wins += 1
 
-                player_kills = 0
-                bot_kills = 0
+            # reset for next match
+            player_kills = 0
+            bot_kills = 0
+            player.health = 100.0
+            for b in bots:
+                b.health = 100.0
+            player.pos = player_spawn.copy()
+            for b in bots:
+                b.pos = bot_spawn.copy()
+            player.jump_offset = 0.0
+            player.vel_y = 0.0
+            player.on_ground = True
 
-                player.health = 100.0
-                bots[0].health = 100.0
-                player.pos = player_spawn.copy()
-                bots[0].pos = bot_spawn.copy()
-                player.jump_offset = 0.0
-                player.vel_y = 0.0
-                player.on_ground = True
+            if matches_played >= 10:
+                running = False
+                user_requested_quit = False
+                break
 
-        # -----------------
         # Render
-        # -----------------
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
 
@@ -990,15 +943,16 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
         draw_muzzle_flashes(flashes)
         draw_shells(shells)
 
-        if mode_id == "duel":
-            first_bot = bots[0] if bots else None
-            draw_health_and_score(
-                player, first_bot, mode_id,
-                player_kills, bot_kills,
-                player_wins, matches_played,
-            )
-        else:
-            draw_leaderboard(kill_counts, show_full=show_leaderboard_full)
+        # draw explosion cubes
+        for ex in explosions:
+            ex.draw()
+
+        first_bot = bots[0] if bots else None
+        draw_health_and_score(
+            player, first_bot,
+            player_kills, bot_kills,
+            player_wins, matches_played,
+        )
 
         draw_gun_ui(player.current_weapon_name)
         draw_crosshair()
@@ -1007,9 +961,18 @@ def run_game(mode_id: str, bot_profile_name: str, start_weapon_name: str, map_na
         clock.tick(120)
 
     pygame.quit()
-    sys.exit()
+    if user_requested_quit:
+        return False
+    return True
 
 
 if __name__ == "__main__":
-    mode_id, bot_name, weapon_name, map_name = show_menu()
-    run_game(mode_id, bot_name, weapon_name, map_name)
+    # Main loop: show menu -> run game -> if run_game returns True, go back to menu,
+    # if it returns False, quit.
+    while True:
+        mode_id, bot_name, weapon_name, map_name, difficulty_value = show_menu()
+        cont = run_game(mode_id, bot_name, weapon_name, map_name, difficulty_value)
+        if not cont:
+            break
+    pygame.quit()
+    sys.exit(0)
